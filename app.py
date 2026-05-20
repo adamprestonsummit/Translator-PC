@@ -112,7 +112,7 @@ STRICT REQUIREMENTS:
 * Do not add explanations or notes
 
 RECOMMENDED STRUCTURE:
-1. Opening: "Bague de fiançailles …" + collection/design + metal + gemstone
+1. Opening: Category (e.g. engagement rings) + collection/design + metal + gemstone
 2. Middle: Stone dimensions + quality + prong style + diamond details
 3. Closing: Elegant luxury/ecommerce wording focused on brilliance, craftsmanship, timeless style, sophistication, and premium finish without adding fake attributes
 
