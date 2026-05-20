@@ -76,7 +76,6 @@ STRICT REQUIREMENTS:
 
 * Every rewritten description MUST be between 500 and 1000 characters
 * Character count is mandatory for EVERY product
-* Start EVERY description with: "Bague de fiançailles …"
 * Use the product title, ID, and original description as the source of truth
 * Include ALL attributes and keywords from BOTH title and description naturally inside the rewritten text
 * Preserve ALL original product data exactly:
