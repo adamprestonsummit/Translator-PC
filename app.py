@@ -185,6 +185,16 @@ DEFAULT_PROMPT = (
 
 MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"]
 
+# ── API key from Streamlit secrets ─────────────────────────────────────────────
+try:
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    st.error(
+        "⚠️  No API key found. Add `OPENAI_API_KEY` to your app's Streamlit secrets. "
+        "See the README for instructions."
+    )
+    st.stop()
+
 # ── Session state defaults ─────────────────────────────────────────────────────
 for key, default in {
     "results": None,
@@ -225,15 +235,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Step 1: API key ────────────────────────────────────────────────────────────
+# ── Step 1: Configuration ──────────────────────────────────────────────────────
 with st.expander("⚙️  Configuration", expanded=not st.session_state.done):
-    api_key = st.text_input(
-        "OpenAI API key",
-        type="password",
-        placeholder="sk-…",
-        help="Your key is never stored — it exists only in this session.",
-    )
-
     col1, col2 = st.columns([2, 1])
     with col1:
         lang_choice = st.selectbox("Target language", LANGUAGES)
@@ -280,14 +283,10 @@ if uploaded:
         st.error(f"Could not read CSV: {e}")
 
 # ── Step 3: Run ────────────────────────────────────────────────────────────────
-can_run = bool(api_key and df_preview is not None and language)
+can_run = bool(df_preview is not None and language)
 
 if st.button("▶  Run Translation", disabled=not can_run):
-    if not api_key.startswith("sk-"):
-        st.error("API key doesn't look right — it should start with `sk-`.")
-        st.stop()
-
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=OPENAI_API_KEY)
     total = len(df_preview)
 
     results_data = []
