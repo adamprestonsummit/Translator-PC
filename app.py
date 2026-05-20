@@ -64,13 +64,13 @@ st.markdown('<div style="margin-top:0.25rem; margin-bottom:0.15rem; height:1px; 
 
 st.markdown("""
 <p class="pc-title">Description Optimiser</p>
-<p class="pc-subtitle">Upload a CSV or Excel file · generate SEO-optimised French descriptions · download results</p>
+<p class="pc-subtitle">Upload a CSV or Excel file · generate SEO-optimised descriptions in any language · download results</p>
 """, unsafe_allow_html=True)
 
 # ── Default prompt (exact brief from client) ──────────────────────────────────
-DEFAULT_PROMPT = """You are a French Google Shopping feed optimisation expert specialised in luxury jewellery ecommerce.
+DEFAULT_PROMPT = """You are a {language} Google Shopping feed optimisation expert specialised in luxury jewellery ecommerce.
 
-Your task is to rewrite product descriptions for Google Shopping feeds in native, SEO-optimised French.
+Your task is to rewrite product descriptions for Google Shopping feeds in native, SEO-optimised {language}.
 
 STRICT REQUIREMENTS:
 
@@ -98,7 +98,7 @@ STRICT REQUIREMENTS:
 * Avoid keyword stuffing
 * Avoid repetitive wording across products
 * Avoid generic filler content
-* Write elegant, fluent, native French suitable for premium jewellery ecommerce
+* Write elegant, fluent, native {language} suitable for premium jewellery ecommerce
 * Optimise for SEO and Google Shopping readability
 * Maintain a consistent structure across all products
 * Descriptions must sound luxurious, concise, and conversion-focused
@@ -138,8 +138,9 @@ for key, default in {"results": None, "errors": [], "done": False}.items():
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
-def optimise_description(client, product_id, title, description, prompt_template, model, retries=3):
+def optimise_description(client, product_id, title, description, prompt_template, model, language, retries=3):
     prompt = (prompt_template
+              .replace("{language}", language)
               .replace("{id}", str(product_id))
               .replace("{title}", str(title))
               .replace("{description}", str(description)))
@@ -159,17 +160,39 @@ def optimise_description(client, product_id, title, description, prompt_template
 
 
 # ── Step 1: Configuration ──────────────────────────────────────────────────────
+LANGUAGES = [
+    "French", "German", "Spanish", "Italian", "Portuguese",
+    "Dutch", "Polish", "Swedish", "Danish", "Norwegian",
+    "Japanese", "Chinese (Simplified)", "Korean", "Arabic",
+    "Other (specify below)",
+]
+
 with st.expander("⚙️  Configuration", expanded=not st.session_state.done):
-    model_choice = st.selectbox("Model", MODELS, help="gpt-4o produces the best French copy quality. gpt-4o-mini is ~10× cheaper and faster.")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        lang_choice = st.selectbox("Output language", LANGUAGES)
+    with col2:
+        model_choice = st.selectbox("Model", MODELS, help="gpt-4o gives the best copy quality. gpt-4o-mini is ~10× cheaper for test runs.")
+
+    if lang_choice == "Other (specify below)":
+        custom_lang = st.text_input("Specify language", placeholder="e.g. Catalan")
+        language = custom_lang.strip() or "French"
+    else:
+        language = lang_choice
+
+    # Inject selected language into the prompt preview
+    prompt_preview = DEFAULT_PROMPT.replace("{language}", language)
+
     system_prompt = st.text_area(
-        "Optimisation prompt  (placeholders: , , )",
-        value=DEFAULT_PROMPT,
+        "Optimisation prompt  (placeholders: `{language}` · `{id}` · `{title}` · `{description}`)",
+        value=prompt_preview,
         height=300,
+        key=f"prompt_{language}",
     )
     st.markdown("""
 <div class="pc-info-box">
-  💡 The prompt above is pre-loaded with the exact client brief. Edit only if requirements change.
-  Placeholders <code>{id}</code>, <code>{title}</code>, and <code>{description}</code> are replaced per row at runtime.
+  💡 The language dropdown fills <code>{language}</code> into the prompt automatically. You can still edit the prompt manually — changes are preserved until you switch language or reload.
+  Other placeholders (<code>{id}</code>, <code>{title}</code>, <code>{description}</code>) are replaced per row at runtime.
 </div>
 """, unsafe_allow_html=True)
 
@@ -246,7 +269,7 @@ if st.button("▶  Run Optimisation", disabled=not can_run):
         )
 
         if title.strip() or desc.strip():
-            optimised, error = optimise_description(client, product_id, title, desc, system_prompt, model_choice)
+            optimised, error = optimise_description(client, product_id, title, desc, system_prompt, model_choice, language)
         else:
             optimised, error = "", None
 
