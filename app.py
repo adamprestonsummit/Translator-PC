@@ -130,10 +130,41 @@ except (KeyError, FileNotFoundError):
     st.error("⚠️  No API key found. Add  to your app's Streamlit secrets.")
     st.stop()
 
+# ── Session ID — stable for the browser tab's lifetime ────────────────────────
+import uuid, os
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex
+SESSION_ID   = st.session_state.session_id
+PROGRESS_FILE = f"/tmp/pc_progress_{SESSION_ID}.csv"
+
 # ── Session state ──────────────────────────────────────────────────────────────
 for key, default in {"results": None, "errors": [], "done": False}.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# ── Recovery banner — shown if a progress file exists on page load ─────────────
+if os.path.exists(PROGRESS_FILE) and not st.session_state.done:
+    try:
+        recovered = pd.read_csv(PROGRESS_FILE, encoding="utf-8-sig")
+        done_n    = (recovered.get("optimisation_status", pd.Series()) == "done").sum()
+        if done_n > 0:
+            st.warning(
+                f"⚠️  A previous run was interrupted with **{done_n} rows completed**. "
+                f"You can download what was saved, then re-upload it to resume.",
+                icon=None,
+            )
+            st.download_button(
+                label=f"⬇  Recover {done_n} completed rows from interrupted run",
+                data=recovered.to_csv(index=False).encode("utf-8-sig"),
+                file_name="optimised_recovered.csv",
+                mime="text/csv; charset=utf-8",
+                key="recovery_download",
+            )
+            if st.button("✕  Dismiss and start fresh"):
+                os.remove(PROGRESS_FILE)
+                st.rerun()
+    except Exception:
+        pass  # corrupt file — ignore silently
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
@@ -179,19 +210,22 @@ with st.expander("⚙️  Configuration", expanded=not st.session_state.done):
     else:
         language = lang_choice
 
-    # Inject selected language into the prompt preview
-    prompt_preview = DEFAULT_PROMPT.replace("{language}", language)
+    st.markdown(
+        f"<p style='font-size:0.82rem;color:#888580;margin:0 0 0.4rem;'>"
+        f"Selected language: <strong style='color:#2d2d2d;'>{language}</strong> — "
+        f"<code>{{language}}</code> in the prompt will be replaced with this at runtime.</p>",
+        unsafe_allow_html=True,
+    )
 
     system_prompt = st.text_area(
         "Optimisation prompt  (placeholders: `{language}` · `{id}` · `{title}` · `{description}`)",
-        value=prompt_preview,
+        value=DEFAULT_PROMPT,
         height=300,
-        key=f"prompt_{language}",
     )
     st.markdown("""
 <div class="pc-info-box">
-  💡 The language dropdown fills <code>{language}</code> into the prompt automatically. You can still edit the prompt manually — changes are preserved until you switch language or reload.
-  Other placeholders (<code>{id}</code>, <code>{title}</code>, <code>{description}</code>) are replaced per row at runtime.
+  💡 <code>{language}</code> is substituted per run — switch the dropdown above to change it without editing the prompt.
+  <code>{id}</code>, <code>{title}</code>, and <code>{description}</code> are replaced per row at runtime.
 </div>
 """, unsafe_allow_html=True)
 
@@ -237,29 +271,65 @@ if uploaded:
     except Exception as e:
         st.error(f"Could not read file: {e}")
 
+# ── Helper: build output dataframe from accumulated results ────────────────────
+def build_output_df(results_data, id_col, title_col, desc_col):
+    if not results_data:
+        return pd.DataFrame()
+    df = pd.DataFrame(results_data)
+    out_cols = [c for c in [id_col, title_col, desc_col, "New Description", "optimisation_status"] if c in df.columns]
+    return df[out_cols]
+
+# ── Step 3: Resume detection ───────────────────────────────────────────────────
+already_done = set()
+if df_preview is not None and "New Description" in df_preview.columns:
+    mask = df_preview["New Description"].notna() & (df_preview["New Description"].astype(str).str.strip() != "")
+    already_done = set(df_preview[mask][id_col].astype(str).tolist())
+    if already_done:
+        st.info(
+            f"ℹ️  {len(already_done)} rows already have a 'New Description' and will be skipped. "
+            f"{len(df_preview) - len(already_done)} rows remaining.",
+            icon=None,
+        )
+
 # ── Step 3: Run ────────────────────────────────────────────────────────────────
+SAVE_EVERY = 25   # write incremental download every N rows
+
 can_run = df_preview is not None
 
 if st.button("▶  Run Optimisation", disabled=not can_run):
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    total = len(df_preview)
-    results_data, errors = [], []
+    client     = OpenAI(api_key=OPENAI_API_KEY)
+    total      = len(df_preview)
+    to_process = total - len(already_done)
 
     st.markdown("---")
     st.markdown("**Optimisation in progress…**")
-    progress_bar = st.progress(0)
-    status_text  = st.empty()
-    m1, m2, m3  = st.columns(3)
-    done_count  = m1.empty()
-    err_count   = m2.empty()
-    eta_display = m3.empty()
-    start_time  = time.time()
+    progress_bar   = st.progress(0)
+    status_text    = st.empty()
+    m1, m2, m3, m4 = st.columns(4)
+    done_count     = m1.empty()
+    skip_count     = m2.empty()
+    err_count      = m3.empty()
+    eta_display    = m4.empty()
+    download_slot  = st.empty()   # live download button updates here
+    start_time     = time.time()
+
+    # Carry forward any rows that were already complete
+    results_data = []
+    errors       = list(st.session_state.errors or [])
+    rows_done    = 0
 
     for i, row in df_preview.iterrows():
         idx        = list(df_preview.index).index(i)
         product_id = str(row[id_col])    if pd.notna(row[id_col])    else ""
         title      = str(row[title_col]) if pd.notna(row[title_col]) else ""
         desc       = str(row[desc_col])  if pd.notna(row[desc_col])  else ""
+
+        # ── Skip rows already completed ────────────────────────────────────────
+        if product_id in already_done:
+            row_result = row.to_dict()
+            row_result["optimisation_status"] = "skipped"
+            results_data.append(row_result)
+            continue
 
         status_text.markdown(
             f"<span style='font-size:0.8rem;color:#888580;font-family:JetBrains Mono,monospace;'>"
@@ -268,7 +338,9 @@ if st.button("▶  Run Optimisation", disabled=not can_run):
         )
 
         if title.strip() or desc.strip():
-            optimised, error = optimise_description(client, product_id, title, desc, system_prompt, model_choice, language)
+            optimised, error = optimise_description(
+                client, product_id, title, desc, system_prompt, model_choice, language
+            )
         else:
             optimised, error = "", None
 
@@ -277,27 +349,55 @@ if st.button("▶  Run Optimisation", disabled=not can_run):
             optimised = ""
 
         row_result = row.to_dict()
-        row_result["New Description"] = optimised
-        row_result["optimisation_status"] = "error" if error else "done"
+        row_result["New Description"]      = optimised
+        row_result["optimisation_status"]  = "error" if error else "done"
         results_data.append(row_result)
 
-        rows_done  = idx + 1
+        # ── Write to disk immediately — survives page refresh ──────────────────
+        try:
+            pd.DataFrame(results_data).to_csv(PROGRESS_FILE, index=False, encoding="utf-8-sig")
+        except Exception:
+            pass  # don't let a disk write failure kill the run
+
+        rows_done += 1
         elapsed    = time.time() - start_time
-        remaining  = int((elapsed / rows_done) * (total - rows_done))
+        remaining  = int((elapsed / rows_done) * max(to_process - rows_done, 0))
         mins, secs = divmod(remaining, 60)
 
-        progress_bar.progress(min(rows_done / total, 1.0))
-        done_count.metric("Optimised", rows_done)
-        err_count.metric("Errors", len(errors))
-        eta_display.metric("ETA", f"{mins}m {secs}s" if remaining > 0 else "Done")
+        skipped_n = len(already_done)
+        done_n    = sum(1 for r in results_data if r.get("optimisation_status") == "done")
+        error_n   = len(errors)
 
+        progress_bar.progress(min((idx + 1) / total, 1.0))
+        done_count.metric("Optimised",  done_n)
+        skip_count.metric("Skipped",    skipped_n)
+        err_count.metric("Errors",      error_n)
+        eta_display.metric("ETA", f"{mins}m {secs}s" if remaining > 0 else "Almost done")
+
+        # ── Incremental download every SAVE_EVERY rows ─────────────────────────
+        if rows_done % SAVE_EVERY == 0:
+            partial_df  = build_output_df(results_data, id_col, title_col, desc_col)
+            partial_csv = partial_df.to_csv(index=False).encode("utf-8-sig")
+            download_slot.download_button(
+                label=f"⬇  Download progress so far ({done_n} rows complete)",
+                data=partial_csv,
+                file_name="optimised_partial.csv",
+                mime="text/csv; charset=utf-8",
+                key=f"partial_{rows_done}",
+            )
+
+    # ── Save final state ───────────────────────────────────────────────────────
     st.session_state.results = pd.DataFrame(results_data)
     st.session_state.errors  = errors
     st.session_state.done    = True
+    # Clean up progress file — run completed cleanly
+    if os.path.exists(PROGRESS_FILE):
+        os.remove(PROGRESS_FILE)
     status_text.markdown(
         "<span style='color:#2e7d52;font-weight:500;'>✓ Optimisation complete</span>",
         unsafe_allow_html=True,
     )
+    download_slot.empty()   # clear partial button — final download appears below
 
 # ── Step 4: Download ───────────────────────────────────────────────────────────
 if st.session_state.done and st.session_state.results is not None:
@@ -306,18 +406,19 @@ if st.session_state.done and st.session_state.results is not None:
 
     res     = st.session_state.results
     done_n  = (res["optimisation_status"] == "done").sum()
+    skip_n  = (res["optimisation_status"] == "skipped").sum()
     error_n = (res["optimisation_status"] == "error").sum()
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total rows", len(res))
     c2.metric("Optimised",  int(done_n))
-    c3.metric("Errors",     int(error_n))
+    c3.metric("Skipped",    int(skip_n))
+    c4.metric("Errors",     int(error_n))
 
     if st.session_state.errors:
         with st.expander(f"⚠️  {error_n} rows had errors"):
             st.dataframe(pd.DataFrame(st.session_state.errors), use_container_width=True)
 
-    # Output columns: id, title, description, New Description (matches source Excel)
     out_cols = [c for c in [id_col, title_col, desc_col, "New Description"] if c in res.columns]
     out_df   = res[out_cols]
 
@@ -337,9 +438,18 @@ if st.session_state.done and st.session_state.results is not None:
             mime="text/csv; charset=utf-8",
         )
 
+    st.markdown("""
+<div class="pc-info-box" style="margin-top:1rem;">
+  💡 <strong>If the run timed out mid-way:</strong> download the partial CSV above, then re-upload it.
+  Any row that already has a <code>New Description</code> will be skipped automatically so you won't re-process or re-spend credits on completed rows.
+</div>
+""", unsafe_allow_html=True)
+
     st.markdown("---")
     if st.button("↺  Start a new run"):
         st.session_state.results = None
         st.session_state.errors  = []
         st.session_state.done    = False
+        if os.path.exists(PROGRESS_FILE):
+            os.remove(PROGRESS_FILE)
         st.rerun()
